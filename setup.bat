@@ -6,7 +6,7 @@ echo ========================================
 echo.
 
 :: Check Python
-echo [1/3] 检查 Python 环境...
+echo [1/2] 检查 Python 环境...
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [错误] 未找到 Python，请先安装 Python 3.10+
@@ -21,7 +21,7 @@ for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do (
 
 :: Install dependencies
 echo.
-echo [2/3] 安装 Python 依赖...
+echo [2/2] 安装 Python 依赖...
 pip install -r requirements.txt
 if errorlevel 1 (
     echo [错误] 依赖安装失败，请检查网络连接
@@ -29,17 +29,6 @@ if errorlevel 1 (
     exit /b 1
 )
 echo   依赖安装完成
-
-:: Check dingwave
-echo.
-echo [3/3] 检查 dingwave 解密工具...
-if exist "tools\dingwave.exe" (
-    echo   已找到 tools\dingwave.exe
-) else (
-    echo   [警告] 未找到 tools\dingwave.exe
-    echo   请从 https://github.com/p1g3/dingwave/releases 下载
-    echo   下载 dingwave_windows_amd64.zip，解压后将 dingwave.exe 放入 tools\ 目录
-)
 
 echo.
 echo ========================================

@@ -7,23 +7,99 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
 
 
-def _detect_dingtalk_user():
-    """Auto-detect DingTalk user data directory and UID.
+def _detect_dingtalk_version(data_dir):
+    """Detect DingTalk version (v2 or v3) from the data directory path."""
+    if data_dir and "_v3" in os.path.basename(data_dir):
+        return 3
+    return 2
 
-    Scans multiple possible DingTalk data directories for *_v2 (or *_v3) folders.
-    Returns (data_dir, uid) or (None, None) if not found.
+
+def _read_v3_salt(data_dir):
+    """Read the salt from V3's user_config file.
+
+    V3 stores a base64-encoded JSON in {data_dir}/user_config containing
+    a 'salt' field needed for key derivation.
+    Returns the salt hex string, or None if not found.
+    """
+    import base64
+    import json
+
+    user_config_path = os.path.join(data_dir, "user_config")
+    if not os.path.isfile(user_config_path):
+        logger.warning(f"V3 user_config not found: {user_config_path}")
+        return None
+
+    try:
+        with open(user_config_path, "r") as f:
+            raw = f.read().strip()
+        decoded = base64.b64decode(raw).decode("utf-8")
+        config_data = json.loads(decoded)
+        salt = config_data.get("salt")
+        if salt:
+            logger.info(f"V3 salt loaded from user_config ({len(salt)} chars)")
+            return salt
+        logger.warning("V3 user_config has no 'salt' field")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to read V3 user_config: {e}")
+        return None
+
+
+def _detect_v3_uid_from_plist():
+    """Try to detect the real numeric UID from DingTalk's plist on macOS.
+
+    V3 uses a short numeric UID (9-10 digits) for key derivation, which is
+    different from the folder name. On macOS, it can be found in the
+    SafeModeKey.safemode_last_crash_uid field of the DingTalk plist.
+    """
+    if sys.platform != "darwin":
+        return None
+
+    import plistlib
+
+    plist_path = os.path.expanduser(
+        "~/Library/Containers/5ZSL2CJU2T.com.dingtalk.mac/"
+        "Data/Library/Preferences/5ZSL2CJU2T.com.dingtalk.mac.plist"
+    )
+    if not os.path.isfile(plist_path):
+        return None
+
+    try:
+        with open(plist_path, "rb") as f:
+            plist = plistlib.load(f)
+        safe_mode = plist.get("SafeModeKey", {})
+        if isinstance(safe_mode, dict):
+            uid_val = safe_mode.get("safemode_last_crash_uid")
+            if uid_val:
+                return str(uid_val)
+    except Exception as e:
+        logger.debug(f"Failed to read plist for UID: {e}")
+    return None
+
+
+def _detect_dingtalk_user():
+    """Auto-detect DingTalk user data directory, UID, version, and V3 salt.
+
+    Scans multiple possible DingTalk data directories for *_v2 / *_v3 folders.
+    Returns (data_dir, uid, version, salt) or (None, None, 2, None) if not found.
+
+    For V3, the UID used for key derivation is a short numeric ID (9-10 digits),
+    NOT the folder name. It is read from the macOS plist or can be set via
+    DINGTALK_UID environment variable.
 
     Override with environment variables:
-      DINGTALK_UID       — your DingTalk user UID
-      DINGTALK_DATA_DIR  — full path to the *_v2 directory
+      DINGTALK_UID       — your DingTalk user UID (numeric, for key derivation)
+      DINGTALK_DATA_DIR  — full path to the *_v2 or *_v3 directory
     """
     # Environment variables take highest priority
     env_uid = os.environ.get("DINGTALK_UID", "").strip()
     env_dir = os.environ.get("DINGTALK_DATA_DIR", "").strip()
 
     if env_uid and env_dir:
-        logger.info(f"Using config from environment: UID={env_uid}")
-        return env_dir, env_uid
+        version = _detect_dingtalk_version(env_dir)
+        salt = _read_v3_salt(env_dir) if version == 3 else None
+        logger.info(f"Using config from environment: UID={env_uid}, version=v{version}")
+        return env_dir, env_uid, version, salt
 
     # Multiple possible DingTalk base directories (ordered by likelihood)
     search_bases = []
@@ -43,6 +119,8 @@ def _detect_dingtalk_user():
     # macOS and Linux paths
     home = os.path.expanduser("~")
     if sys.platform == "darwin":
+        container_base = os.path.join(home, "Library", "Containers", "5ZSL2CJU2T.com.dingtalk.mac", "Data", "Library", "Application Support", "DingTalkMac")
+        search_bases.append(container_base)
         search_bases.append(os.path.join(home, "Library", "Application Support", "DingTalk"))
     elif sys.platform.startswith("linux"):
         search_bases.append(os.path.join(home, ".config", "DingTalk"))
@@ -59,7 +137,7 @@ def _detect_dingtalk_user():
     search_bases = unique_bases
 
     # Find all *_v2 / *_v3 user directories that have a database file
-    v2_dirs = []
+    found_dirs = []
     for dingtalk_base in search_bases:
         if not os.path.isdir(dingtalk_base):
             continue
@@ -69,28 +147,45 @@ def _detect_dingtalk_user():
                 if os.path.isdir(full_path):
                     db_file = os.path.join(full_path, "DBFiles", "dingtalk.db")
                     if os.path.exists(db_file):
-                        uid = entry.rsplit("_v", 1)[0]
+                        folder_id = entry.rsplit("_v", 1)[0]
+                        version = _detect_dingtalk_version(full_path)
                         mtime = os.path.getmtime(db_file)
-                        v2_dirs.append((uid, full_path, mtime))
+                        found_dirs.append((folder_id, full_path, mtime, version))
 
-    if not v2_dirs:
-        return None, None
+    if not found_dirs:
+        return None, None, 2, None
 
-    if len(v2_dirs) == 1:
-        uid, path, _ = v2_dirs[0]
-        logger.info(f"Auto-detected DingTalk user: UID={uid}")
-        return path, uid
+    # Prefer V3 over V2, then most recently modified
+    found_dirs.sort(key=lambda x: (x[3], x[2]), reverse=True)
+    folder_id, path, _, version = found_dirs[0]
 
-    # Multiple users: pick the one with most recently modified database
-    v2_dirs.sort(key=lambda x: x[2], reverse=True)
-    uid, path, _ = v2_dirs[0]
-    all_uids = [f"  UID={u} (path={p})" for u, p, _ in v2_dirs]
-    logger.warning(
-        f"Multiple DingTalk users found, using the most recent (UID={uid}):\n"
-        + "\n".join(all_uids)
-        + "\nTo use a different user, set DINGTALK_UID and DINGTALK_DATA_DIR environment variables."
-    )
-    return path, uid
+    # For V3, the real UID is NOT the folder name — it's a short numeric ID
+    if version == 3:
+        uid = _detect_v3_uid_from_plist()
+        if uid:
+            logger.info(f"Auto-detected V3 UID from plist: {uid}")
+        else:
+            uid = folder_id
+            logger.warning(
+                f"Could not detect V3 numeric UID from plist, using folder name: {uid}\n"
+                f"Set DINGTALK_UID environment variable to the correct numeric UID."
+            )
+        salt = _read_v3_salt(path)
+    else:
+        uid = folder_id
+        salt = None
+
+    if len(found_dirs) == 1:
+        logger.info(f"Auto-detected DingTalk user: UID={uid}, version=v{version}")
+    else:
+        all_info = [f"  {fid} (v{v}, path={p})" for fid, p, _, v in found_dirs]
+        logger.warning(
+            f"Multiple DingTalk users found, using v{version} (UID={uid}):\n"
+            + "\n".join(all_info)
+            + "\nTo use a different user, set DINGTALK_UID and DINGTALK_DATA_DIR."
+        )
+
+    return path, uid, version, salt
 
 
 def _detect_dingwave():
@@ -137,10 +232,12 @@ def _detect_dingwave():
 #   DINGTALK_DATA_DIR  = full path to your DingTalk data directory
 #
 # Manual defaults (fallback when auto-detection and env vars both fail):
-_detected_dir, _detected_uid = _detect_dingtalk_user()
+_detected_dir, _detected_uid, _detected_version, _detected_salt = _detect_dingtalk_user()
 
 DINGTALK_DATA_DIR = _detected_dir or r"C:\Users\<YOUR_USERNAME>\AppData\Roaming\DingTalk\<YOUR_UID>_v2"
 USER_UID = _detected_uid or "<YOUR_UID>"
+DINGTALK_VERSION = _detected_version  # 2 or 3
+V3_SALT = _detected_salt  # hex string, only for V3
 
 ENCRYPTED_DB_DIR = os.path.join(DINGTALK_DATA_DIR, "DBFiles")
 ENCRYPTED_DB = os.path.join(ENCRYPTED_DB_DIR, "dingtalk.db")
