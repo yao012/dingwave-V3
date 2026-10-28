@@ -12,6 +12,8 @@ import shutil
 import sys
 import urllib.error
 import urllib.request
+import uuid
+from datetime import datetime
 
 import config
 from parser import get_connection, get_messages
@@ -40,6 +42,11 @@ _LEGACY_CONFIG_PATH = os.path.join(config.DATA_DIR, "ai_config.json")
 # In-memory cache; invalidated when the file's mtime changes or after writes.
 _store_cache = None
 _store_mtime = None
+
+# Analysis history lives with the other runtime data (gitignored).
+HISTORY_PATH = os.path.join(config.DATA_DIR, "ai_history.json")
+# ponytail: keep the newest 200 records; move to sqlite if this ever grows.
+HISTORY_LIMIT = 200
 
 # Any OpenAI-compatible endpoint works (DeepSeek, Qwen/DashScope, Kimi, GLM,
 # Ollama, one-api, ...). Anthropic's native protocol is not supported; put a
@@ -249,6 +256,76 @@ def public_config():
     }
 
 
+def _load_history():
+    """Read saved analysis records, newest first."""
+    if not os.path.isfile(HISTORY_PATH):
+        return []
+    try:
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"Failed to load AI history: {e}")
+        return []
+    if not isinstance(data, list):
+        return []
+    return [r for r in data if isinstance(r, dict)]
+
+
+def _write_history(records):
+    """Write analysis records atomically."""
+    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+    tmp_path = HISTORY_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, HISTORY_PATH)
+
+
+def save_history(cid, title, prompt, model, messages_used, messages_total, answer):
+    """Append one analysis record and return it.
+
+    Only the newest HISTORY_LIMIT records are kept; the file is newest-first.
+    """
+    record = {
+        "id": uuid.uuid4().hex,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "cid": cid,
+        "title": title or cid,
+        "prompt": prompt,
+        "model": model,
+        "messages_used": messages_used,
+        "messages_total": messages_total,
+        "answer": answer,
+    }
+    _write_history(([record] + _load_history())[:HISTORY_LIMIT])
+    return record
+
+
+def list_history(cid=None, limit=100):
+    """Return saved analysis records, newest first.
+
+    Args:
+        cid: Optional conversation id to filter by.
+        limit: Maximum number of records to return.
+
+    Returns:
+        A list of record dicts.
+    """
+    records = _load_history()
+    if cid:
+        records = [r for r in records if r.get("cid") == cid]
+    return records[:limit]
+
+
+def delete_history(record_id):
+    """Delete one analysis record; return False when the id does not exist."""
+    records = _load_history()
+    kept = [r for r in records if r.get("id") != record_id]
+    if len(kept) == len(records):
+        return False
+    _write_history(kept)
+    return True
+
+
 def _completions_url(base_url):
     """Build the chat completions URL from a base URL."""
     url = base_url.rstrip("/")
@@ -429,6 +506,7 @@ def analyze_stream(cid, prompt, limit=200):
     yield {
         "type": "meta",
         "model": cfg["model"],
+        "title": title,
         "messages_used": used,
         "messages_total": total,
     }
@@ -438,12 +516,49 @@ def analyze_stream(cid, prompt, limit=200):
         f"--- Chat transcript (oldest first) ---\n{transcript}\n--- End ---\n\n"
         f"User request:\n{prompt}"
     )
+    parts = []
     for kind, text in stream_chat(
         [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
     ):
+        if kind == "content":
+            parts.append(text)
         yield {"type": kind, "text": text}
 
+    answer = "".join(parts).strip()
+    if answer:
+        try:
+            save_history(cid, title, prompt, cfg["model"], used, total, answer)
+        except OSError as e:
+            logger.warning(f"Failed to save AI history: {e}")
+
     yield {"type": "done"}
+
+
+def _history_demo():
+    """Assert-based self-check for the analysis history store."""
+    global HISTORY_PATH
+    import tempfile
+
+    original = HISTORY_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        HISTORY_PATH = os.path.join(tmp, "ai_history.json")
+        try:
+            for i in range(HISTORY_LIMIT + 5):
+                save_history(f"cid{i}", f"title{i}", "prompt", "m", 1, 2, f"answer{i}")
+            assert len(_load_history()) == HISTORY_LIMIT
+            newest = list_history(limit=1)[0]
+            assert newest["cid"] == f"cid{HISTORY_LIMIT + 4}"
+            assert list_history(cid="cid190")[0]["answer"] == "answer190"
+            assert delete_history(newest["id"]) is True
+            assert delete_history("missing") is False
+            assert len(_load_history()) == HISTORY_LIMIT - 1
+        finally:
+            HISTORY_PATH = original
+    print("ai history self-check ok")
+
+
+if __name__ == "__main__":
+    _history_demo()

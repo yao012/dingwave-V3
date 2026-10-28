@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>钉钉聊天记录导出工具</title>
-    <link rel="stylesheet" href="/static/style.css?v=20261028c">
+    <link rel="stylesheet" href="/static/style.css?v=20261028d">
 </head>
 <body>
     <div id="app">
@@ -22,6 +22,7 @@
                     </button>
                 </div>
                 <button id="aiBtn" class="btn btn-secondary" title="AI 分析当前会话">AI 分析</button>
+                <button id="aiHistoryBtn" class="btn btn-secondary" title="查看历史 AI 分析记录">分析记录</button>
                 <button id="syncBtn" class="btn btn-primary" title="手动同步">手动同步</button>
                 <button id="exportBtn" class="btn btn-secondary" title="导出列表">导出</button>
             </div>
@@ -203,6 +204,21 @@
             </div>
         </div>
 
+        <!-- AI analysis history modal -->
+        <div class="modal" id="aiHistoryModal" style="display:none">
+            <div class="modal-content modal-wide ai-modal">
+                <div class="modal-header">
+                    <h3>AI 分析记录 <span class="ai-conv-title" id="aiHistoryCount"></span></h3>
+                    <button class="modal-close" id="aiHistoryClose">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="aiHistoryList">
+                        <div class="loading">加载中...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Image lightbox -->
         <div class="lightbox" id="lightbox" style="display:none">
             <button class="lightbox-close" id="lightboxClose">&times;</button>
@@ -210,6 +226,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20261028b"></script>
+    <script src="/static/app.js?v=20261028c"></script>
 </body>
 </html>

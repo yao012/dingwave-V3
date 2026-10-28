@@ -1000,6 +1000,54 @@ async function runAiAnalyze() {
     }
 }
 
+// --- AI analysis history ---
+
+async function openAiHistory() {
+    document.getElementById('aiHistoryModal').style.display = 'flex';
+    await loadAiHistory();
+}
+
+async function loadAiHistory() {
+    const box = document.getElementById('aiHistoryList');
+    box.innerHTML = '<div class="loading">加载中...</div>';
+    try {
+        const data = await apiGet('/api/ai/history?limit=200');
+        const records = data.records || [];
+        document.getElementById('aiHistoryCount').textContent =
+            records.length ? `· 共 ${records.length} 条` : '';
+        if (!records.length) {
+            box.innerHTML = '<div class="loading">暂无分析记录</div>';
+            return;
+        }
+        box.innerHTML = records.map(r => `
+            <div class="ai-history-item">
+                <div class="ai-history-head">
+                    <span class="ai-history-title">${escapeHtml(r.title || r.cid)}</span>
+                    <span class="ai-history-meta">${escapeHtml(r.created_at || '')} · ${escapeHtml(r.model || '')}</span>
+                    <button class="ai-history-del" data-id="${escapeHtml(r.id)}" title="删除这条记录">&times;</button>
+                </div>
+                <div class="ai-history-prompt">${escapeHtml(r.prompt || '')}</div>
+                <details class="ai-history-answer">
+                    <summary>查看分析结果</summary>
+                    <div class="ai-answer ai-history-body">${renderAiMarkdown(r.answer || '')}</div>
+                </details>
+            </div>`).join('');
+    } catch (e) {
+        box.innerHTML = `<div class="loading">读取失败: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function deleteAiHistory(id) {
+    try {
+        const resp = await fetch(`${API_BASE}/api/ai/history/${encodeURIComponent(id)}`,
+            { method: 'DELETE' });
+        if (!resp.ok) throw await _apiError(resp);
+        await loadAiHistory();
+    } catch (e) {
+        document.getElementById('aiHistoryCount').textContent = `· 删除失败: ${e.message}`;
+    }
+}
+
 // --- Lightbox ---
 
 function openLightbox(src) {
@@ -1199,6 +1247,16 @@ function init() {
     });
     document.getElementById('aiPrompt').addEventListener('keydown', e => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runAiAnalyze();
+    });
+
+    // AI analysis history
+    document.getElementById('aiHistoryBtn').addEventListener('click', openAiHistory);
+    document.getElementById('aiHistoryClose').addEventListener('click', () => {
+        document.getElementById('aiHistoryModal').style.display = 'none';
+    });
+    document.getElementById('aiHistoryList').addEventListener('click', e => {
+        const btn = e.target.closest('.ai-history-del');
+        if (btn) deleteAiHistory(btn.dataset.id);
     });
 
     // Lightbox

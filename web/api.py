@@ -366,6 +366,23 @@ def api_ai_analyze(body: dict):
     )
 
 
+@app.get("/api/ai/history")
+async def api_ai_history(
+    cid: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """List saved AI analysis records, newest first."""
+    return {"records": ai.list_history(cid=cid, limit=limit)}
+
+
+@app.delete("/api/ai/history/{record_id}")
+async def api_ai_history_delete(record_id: str):
+    """Delete one saved AI analysis record."""
+    if not ai.delete_history(record_id):
+        raise HTTPException(status_code=404, detail="Record not found")
+    return {"ok": True}
+
+
 @app.get("/api/exports")
 async def api_list_exports():
     """List all exports (directories and legacy JSON files)."""
