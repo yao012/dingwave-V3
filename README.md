@@ -29,8 +29,10 @@ V3 文件夹名是 20 位 hex（如 `xxxxxxxxxx_v3`），但密钥推导用的 u
 | 平台 | 获取方式 |
 |------|---------|
 | macOS | 自动从 DingTalk plist 的 `SafeModeKey.safemode_last_crash_uid` 读取 |
-| Windows | 从 `globalStorage/storage.db` 解密后查询，或设置环境变量 |
-| 通用 | `export DINGTALK_UID=你的数字UID` |
+| Windows | 自动扫描钉钉 `gaea.log` 尾部的 `uid=...@dingding` 记录 |
+| 通用 | 自动探测失败时：`export DINGTALK_UID=你的数字UID` |
+
+数据目录同样会自动探测：默认安装路径、被 `redirectAppData.dat` 重定向的自定义目录都会被扫描；可用 `DINGTALK_DATA_DIR` 直接指定。
 
 ### V3 的 salt 从哪来？
 
@@ -71,19 +73,40 @@ python main.py
 - 20+ 种消息类型解析（文本、图片、文件、富文本、引用、审批等）
 - 图片预览、附件导出、ZIP 打包下载
 - 导出 JSON 含 AI 友好的 `content` 字段
+- **AI 分析**：接入任意 OpenAI 兼容模型，流式总结 / 提待办 / 找风险，支持多模型切换与历史记录
 - 每 4 小时自动增量同步
-- 完全离线，无需云端 API
+- 解密、浏览、导出全部本地完成
+
+## AI 分析
+
+选中会话后点击顶栏 **「AI 分析」**，在「模型配置」中填写接口地址（如 `https://api.deepseek.com/v1`）、模型名（如 `deepseek-chat`）和 API Key，保存后点「测试连接」即可使用。
+
+- 任何 OpenAI 兼容接口均可：DeepSeek、通义千问、Kimi、GLM、Ollama、one-api 等（不支持 Anthropic 原生协议）
+- 可保存多个模型，按「接口地址 + 模型」去重，下拉框随时切换
+- 快捷提示词：总结 / 待办 / 风险；可选择携带最近 100 / 300 / 1000 条消息
+- 流式输出；模型返回 `reasoning_content` 时单独展示「思考过程」
+- 每次完成的分析自动记录，顶栏 **「分析记录」** 可查看、展开、删除，最多保留 200 条
+
+**密钥与数据位置：**
+
+| 内容 | 路径 |
+|------|------|
+| 模型配置（含密钥） | Windows `%APPDATA%\dingwave-V3\ai_config.json`；macOS `~/Library/Application Support/dingwave-V3/`；Linux `~/.config/dingwave-V3/`，可用 `DINGTALK_AI_CONFIG` 覆盖 |
+| 分析记录 | `data/ai_history.json`（已被 gitignore） |
+
+密钥只保存在本机、不会返回浏览器；但**分析时会把所选范围的聊天文本发送给你配置的模型服务商**，请自行确认内容是否适合外发。不配置 AI 时工具完全本地运行。
 
 ## 项目结构
 
 ```
 ├── main.py            # 入口（uvicorn 服务器）
-├── config.py          # 配置（自动检测 V2/V3、读取 salt、提取 uid）
+├── config.py          # 配置（自动检测 V2/V3、数据目录、读取 salt、提取 uid）
 ├── decrypt.py         # 解密核心（V2 MD5 / V3 PBKDF2+MD5，AES-ECB）
 ├── parser.py          # 消息解析（128 个分片表 tbmsg_000–tbmsg_127）
 ├── exporter.py        # 导出 JSON + 附件打包
 ├── attachment.py      # 附件管理
 ├── scheduler.py       # 定时同步（APScheduler）
+├── ai.py              # AI 分析（OpenAI 兼容接口、多模型、流式、历史记录）
 ├── web/
 │   ├── api.py         # FastAPI 路由
 │   └── static/        # 前端（HTML/CSS/JS）
