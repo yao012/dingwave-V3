@@ -45,6 +45,71 @@ def _read_v3_salt(data_dir):
         return None
 
 
+def _read_redirected_appdata():
+    """Read DingTalk's redirectAppData.dat and return the custom data roots.
+
+    DingTalk lets users (or the installer) move its data directory elsewhere.
+    The chosen root is stored in {APPDATA}/DingTalk/redirectAppData.dat and
+    contains the *_v2 / *_v3 user folders directly (not a DingTalk subfolder).
+    """
+    roots = []
+    for base in (os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA")):
+        if not base:
+            continue
+        redirect_file = os.path.join(base, "DingTalk", "redirectAppData.dat")
+        if not os.path.isfile(redirect_file):
+            continue
+        try:
+            with open(redirect_file, "r", encoding="utf-8", errors="ignore") as f:
+                root = f.readline().strip().strip('"').strip()
+        except OSError as e:
+            logger.debug(f"Failed to read {redirect_file}: {e}")
+            continue
+        if not root or not os.path.isdir(root):
+            logger.debug(f"Ignoring redirected data root (not found): {root}")
+            continue
+        logger.info(f"Detected redirected DingTalk data root: {root}")
+        roots.append(root)
+        roots.append(os.path.join(root, "DingTalk"))
+    return roots
+
+
+def _detect_v3_uid_from_logs(data_dir):
+    """Detect the numeric V3 UID on Windows from DingTalk's gaea log.
+
+    V3 logs lines like `uid=35984434@dingding` / `real_uid=35984434@dingding`.
+    The logs live in {parent_of_data_dir}/log, so the newest ones are scanned
+    from the tail (they can be tens of MB).
+    """
+    if sys.platform != "win32":
+        return None
+
+    import glob
+    import re
+
+    log_dir = os.path.join(os.path.dirname(os.path.normpath(data_dir)), "log")
+    log_files = sorted(
+        glob.glob(os.path.join(log_dir, "gaea.log*")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    pattern = re.compile(rb"(?:real_)?uid=(\d+)@dingding")
+    for path in log_files[:3]:
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                f.seek(max(0, size - 2 * 1024 * 1024))
+                chunk = f.read()
+            matches = pattern.findall(chunk)
+            if matches:
+                uid = matches[-1].decode()
+                logger.info(f"Auto-detected V3 UID from DingTalk logs: {uid}")
+                return uid
+        except OSError as e:
+            logger.debug(f"Failed to scan {path} for UID: {e}")
+    return None
+
+
 def _detect_v3_uid_from_plist():
     """Try to detect the real numeric UID from DingTalk's plist on macOS.
 
@@ -84,8 +149,8 @@ def _detect_dingtalk_user():
     Returns (data_dir, uid, version, salt) or (None, None, 2, None) if not found.
 
     For V3, the UID used for key derivation is a short numeric ID (9-10 digits),
-    NOT the folder name. It is read from the macOS plist or can be set via
-    DINGTALK_UID environment variable.
+    NOT the folder name. It is read from the macOS plist, from DingTalk's Windows
+    logs, or can be set via DINGTALK_UID environment variable.
 
     Override with environment variables:
       DINGTALK_UID       — your DingTalk user UID (numeric, for key derivation)
@@ -103,6 +168,8 @@ def _detect_dingtalk_user():
 
     # Multiple possible DingTalk base directories (ordered by likelihood)
     search_bases = []
+    # A redirected data root supersedes the default locations.
+    search_bases.extend(_read_redirected_appdata())
     appdata = os.environ.get("APPDATA", "")
     local_appdata = os.environ.get("LOCALAPPDATA", "")
     userprofile = os.environ.get("USERPROFILE", "")
@@ -161,7 +228,7 @@ def _detect_dingtalk_user():
 
     # For V3, the real UID is NOT the folder name — it's a short numeric ID
     if version == 3:
-        uid = _detect_v3_uid_from_plist()
+        uid = _detect_v3_uid_from_plist() or _detect_v3_uid_from_logs(path)
         if uid:
             logger.info(f"Auto-detected V3 UID from plist: {uid}")
         else:

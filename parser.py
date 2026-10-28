@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import logging
 from datetime import datetime
@@ -23,6 +24,13 @@ def get_connection(db_path=None):
     """Get a SQLite connection to the decrypted database."""
     if db_path is None:
         db_path = config.DECRYPTED_DB_PATH
+    # sqlite3.connect() silently creates an empty DB, which then fails with
+    # "no such table" on the first query. Fail early with an actionable message.
+    if not os.path.isfile(db_path):
+        raise FileNotFoundError(
+            f"Decrypted database not found: {db_path}\n"
+            "Run a sync first (POST /api/sync/trigger) to decrypt DingTalk's data."
+        )
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

@@ -2,7 +2,7 @@ import os
 import logging
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
@@ -23,6 +23,12 @@ app.add_middleware(
 
 # Scheduler (initialized lazily)
 _scheduler = None
+
+
+@app.exception_handler(FileNotFoundError)
+async def _file_not_found_handler(request, exc):
+    """Return a readable 503 instead of a stack trace when the DB is missing."""
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.on_event("startup")

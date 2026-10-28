@@ -81,6 +81,13 @@ def copy_encrypted_db(retry_count=None, retry_delay=None):
     if retry_delay is None:
         retry_delay = config.COPY_RETRY_DELAY
 
+    if not os.path.isfile(config.ENCRYPTED_DB):
+        raise FileNotFoundError(
+            f"DingTalk database not found at: {config.ENCRYPTED_DB}\n"
+            "Make sure the DingTalk desktop client is installed and logged in, "
+            "or set DINGTALK_DATA_DIR / DINGTALK_UID."
+        )
+
     temp_dir = tempfile.mkdtemp(prefix="dingtalk_encrypt_", dir=config.DECRYPTED_DIR)
     dest_db = os.path.join(temp_dir, "dingtalk_encrypted.db")
 
