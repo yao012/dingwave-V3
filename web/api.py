@@ -1,10 +1,12 @@
+import json
 import os
 import logging
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+import ai
 import config
 from parser import get_connection, get_conversations, get_messages, search_messages, get_conversation_stats
 from scheduler import get_sync_state, do_sync, setup_scheduler
@@ -290,6 +292,78 @@ async def api_export_file(filename: str):
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(filepath, media_type="application/json", filename=filename)
+
+
+@app.get("/api/ai/config")
+async def api_ai_config():
+    """Return the AI config with the API key masked."""
+    return ai.public_config()
+
+
+@app.post("/api/ai/config")
+def api_ai_save_config(body: dict):
+    """Add or update a model in the local config and make it active."""
+    try:
+        ai.save_config(body)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ai.public_config()
+
+
+@app.post("/api/ai/config/active")
+def api_ai_set_active(body: dict):
+    """Select one of the locally saved models."""
+    try:
+        ai.set_active((body.get("id") or "").strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ai.public_config()
+
+
+@app.post("/api/ai/test")
+def api_ai_test():
+    """Send a test prompt to the configured model."""
+    try:
+        reply = ai.test_connection()
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True, "reply": reply}
+
+
+@app.post("/api/ai/analyze")
+def api_ai_analyze(body: dict):
+    """Stream a conversation analysis as Server-Sent Events."""
+    cid = (body.get("cid") or "").strip()
+    prompt = (body.get("prompt") or "").strip()
+    if not cid or not prompt:
+        raise HTTPException(status_code=400, detail="cid and prompt are required")
+
+    try:
+        limit = int(body.get("limit") or 200)
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(1, min(limit, 2000))
+
+    def event_stream():
+        """Serialize analysis events as SSE frames."""
+        try:
+            for event in ai.analyze_stream(cid, prompt, limit):
+                yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+        except (ValueError, RuntimeError) as e:
+            yield "data: " + json.dumps(
+                {"type": "error", "message": str(e)}, ensure_ascii=False
+            ) + "\n\n"
+        except Exception as e:
+            logger.error(f"AI stream failed: {e}", exc_info=True)
+            yield "data: " + json.dumps(
+                {"type": "error", "message": "AI stream failed"}, ensure_ascii=False
+            ) + "\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/exports")

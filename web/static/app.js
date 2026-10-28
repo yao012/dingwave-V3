@@ -15,15 +15,31 @@ const state = {
 
 // --- API helpers ---
 
+async function _apiError(resp) {
+    let msg = `API error: ${resp.status}`;
+    try {
+        const data = await resp.json();
+        if (data && data.detail) {
+            msg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+        }
+    } catch (e) { /* not JSON */ }
+    return new Error(msg);
+}
+
 async function apiGet(path) {
     const resp = await fetch(API_BASE + path);
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    if (!resp.ok) throw await _apiError(resp);
     return resp.json();
 }
 
-async function apiPost(path) {
-    const resp = await fetch(API_BASE + path, { method: 'POST' });
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+async function apiPost(path, body) {
+    const opts = { method: 'POST' };
+    if (body !== undefined) {
+        opts.headers = { 'Content-Type': 'application/json' };
+        opts.body = JSON.stringify(body);
+    }
+    const resp = await fetch(API_BASE + path, opts);
+    if (!resp.ok) throw await _apiError(resp);
     return resp.json();
 }
 
@@ -606,6 +622,384 @@ function renderExportConvList(keyword) {
     });
 }
 
+// --- AI analysis ---
+
+let _aiConfigured = false;
+let _aiConfig = null;
+
+function _aiSetStatus(id, text, isError) {
+    const el = document.getElementById(id);
+    el.textContent = text || '';
+    el.classList.toggle('error', !!isError);
+}
+
+function _inlineMarkdown(text) {
+    // Protect inline code so bold/link rules do not touch it
+    const codes = [];
+    let html = text.replace(/`([^`]+)`/g, (m, code) => {
+        codes.push(code);
+        return `\u0000${codes.length - 1}\u0000`;
+    });
+
+    html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
+        if (!/^(https?:\/\/|mailto:|\/|#)/i.test(url) || /["'<>]/.test(url)) {
+            return label;
+        }
+        return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    });
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    html = html.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[i]}</code>`);
+    return html;
+}
+
+function _splitTableRow(row) {
+    return row.replace(/^\s*\|/, '').replace(/\|\s*$/, '')
+        .split('|').map(cell => cell.trim());
+}
+
+function renderAiMarkdown(text) {
+    // Escape first: model output is untrusted
+    const lines = escapeHtml(text || '').split('\n');
+    let html = '';
+    let listType = null;
+    let listItems = [];
+    let para = [];
+    let i = 0;
+
+    const flushList = () => {
+        if (listItems.length) {
+            html += `<${listType}>${listItems.join('')}</${listType}>`;
+            listItems = [];
+            listType = null;
+        }
+    };
+    const flushPara = () => {
+        if (para.length) {
+            html += `<p>${para.join('<br>')}</p>`;
+            para = [];
+        }
+    };
+    const flushAll = () => { flushPara(); flushList(); };
+
+    while (i < lines.length) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        // Fenced code block
+        if (trimmed.startsWith('```')) {
+            flushAll();
+            const code = [];
+            i++;
+            while (i < lines.length && !lines[i].trim().startsWith('```')) {
+                code.push(lines[i]);
+                i++;
+            }
+            i++; // closing fence
+            html += `<pre><code>${code.join('\n')}</code></pre>`;
+            continue;
+        }
+
+        if (!trimmed) {
+            flushAll();
+            i++;
+            continue;
+        }
+
+        // Horizontal rule
+        if (/^([-*_])\1{2,}$/.test(trimmed)) {
+            flushAll();
+            html += '<hr>';
+            i++;
+            continue;
+        }
+
+        // Table: header line followed by a separator line
+        if (trimmed.includes('|') && i + 1 < lines.length &&
+            /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(lines[i + 1])) {
+            flushAll();
+            const headers = _splitTableRow(trimmed);
+            i += 2;
+            const rows = [];
+            while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+                rows.push(_splitTableRow(lines[i].trim()));
+                i++;
+            }
+            html += '<table class="ai-md-table"><thead><tr>' +
+                headers.map(h => `<th>${_inlineMarkdown(h)}</th>`).join('') +
+                '</tr></thead><tbody>';
+            rows.forEach(row => {
+                html += '<tr>' + headers.map((_, idx) =>
+                    `<td>${_inlineMarkdown(row[idx] || '')}</td>`).join('') + '</tr>';
+            });
+            html += '</tbody></table>';
+            continue;
+        }
+
+        // Headings
+        const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+        if (heading) {
+            flushAll();
+            const level = Math.min(heading[1].length + 2, 6);
+            html += `<h${level}>${_inlineMarkdown(heading[2])}</h${level}>`;
+            i++;
+            continue;
+        }
+
+        // Blockquote (">" is HTML-escaped to "&gt;" above)
+        if (/^&gt;\s?/.test(trimmed)) {
+            flushAll();
+            const quoted = [];
+            while (i < lines.length && /^&gt;\s?/.test(lines[i].trim())) {
+                quoted.push(_inlineMarkdown(lines[i].trim().replace(/^&gt;\s?/, '')));
+                i++;
+            }
+            html += `<blockquote>${quoted.join('<br>')}</blockquote>`;
+            continue;
+        }
+
+        // Lists (nested levels are flattened)
+        const item = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+        if (item) {
+            flushPara();
+            const type = /\d/.test(item[2]) ? 'ol' : 'ul';
+            if (listType && listType !== type) flushList();
+            listType = type;
+            listItems.push(`<li>${_inlineMarkdown(item[3])}</li>`);
+            i++;
+            continue;
+        }
+
+        flushList();
+        para.push(_inlineMarkdown(trimmed));
+        i++;
+    }
+
+    flushAll();
+    return html;
+}
+
+function _fillAiForm(entry) {
+    document.getElementById('aiBaseUrl').value = entry ? entry.base_url : '';
+    document.getElementById('aiModel').value = entry ? entry.model : '';
+    document.getElementById('aiTemperature').value = entry ? entry.temperature : 0.7;
+
+    const keyInput = document.getElementById('aiApiKey');
+    keyInput.value = '';
+    keyInput.placeholder = entry && entry.has_key ? '已保存，留空不修改' : 'sk-...';
+}
+
+function _applyAiConfig(cfg) {
+    _aiConfig = cfg;
+    const models = cfg.models || [];
+
+    // Reuse locally saved models first; only offer "new" when needed
+    const sel = document.getElementById('aiModelSelect');
+    sel.innerHTML = models.map(m =>
+        `<option value="${escapeHtml(m.id)}">${escapeHtml(m.model)} · ${escapeHtml(m.base_url)}</option>`
+    ).join('') + '<option value="__new__">＋ 新增模型</option>';
+    sel.value = cfg.active ? cfg.active.id : '__new__';
+
+    _fillAiForm(cfg.active);
+    _aiConfigured = !!cfg.active;
+    document.getElementById('aiConfigSummary').textContent = models.length
+        ? `本地已保存 ${models.length} 个，当前：${cfg.active ? cfg.active.model : '无'}`
+        : '未配置';
+    // Open the config panel on first use
+    document.getElementById('aiConfigBox').open = !_aiConfigured;
+}
+
+async function onAiModelSelectChange() {
+    const sel = document.getElementById('aiModelSelect');
+    if (sel.value === '__new__') {
+        _fillAiForm(null);
+        _aiSetStatus('aiConfigStatus', '填写后点「保存配置」即可新增模型');
+        return;
+    }
+
+    const entry = ((_aiConfig && _aiConfig.models) || []).find(m => m.id === sel.value);
+    if (!entry) return;
+    _fillAiForm(entry);
+    try {
+        _applyAiConfig(await apiPost('/api/ai/config/active', { id: entry.id }));
+        _aiSetStatus('aiConfigStatus', `已切换到 ${entry.model}`);
+    } catch (e) {
+        _aiSetStatus('aiConfigStatus', '切换失败: ' + e.message, true);
+    }
+}
+
+async function openAiModal() {
+    const conv = state.conversations.find(c => c.cid === state.currentCid);
+    document.getElementById('aiConvTitle').textContent = conv
+        ? `· ${conv.title}` : '· 未选择会话';
+    document.getElementById('aiModal').style.display = 'flex';
+
+    try {
+        _applyAiConfig(await apiGet('/api/ai/config'));
+    } catch (e) {
+        _aiSetStatus('aiConfigStatus', '读取配置失败: ' + e.message, true);
+    }
+}
+
+async function saveAiConfig() {
+    const body = {
+        base_url: document.getElementById('aiBaseUrl').value.trim(),
+        model: document.getElementById('aiModel').value.trim(),
+        temperature: parseFloat(document.getElementById('aiTemperature').value) || 0,
+    };
+    const key = document.getElementById('aiApiKey').value.trim();
+    if (key) body.api_key = key;
+
+    _aiSetStatus('aiConfigStatus', '保存中...');
+    try {
+        _applyAiConfig(await apiPost('/api/ai/config', body));
+        _aiSetStatus('aiConfigStatus', '已保存并设为当前模型');
+        return true;
+    } catch (e) {
+        _aiSetStatus('aiConfigStatus', '保存失败: ' + e.message, true);
+        return false;
+    }
+}
+
+async function testAiConnection() {
+    const btn = document.getElementById('aiTestBtn');
+    btn.disabled = true;
+    try {
+        // Persist the form first so a newly typed model can be tested
+        if (!(await saveAiConfig())) return;
+        _aiSetStatus('aiConfigStatus', '测试中...');
+        const data = await apiPost('/api/ai/test');
+        _aiSetStatus('aiConfigStatus', '连接成功：' + (data.reply || 'OK').substring(0, 80));
+    } catch (e) {
+        _aiSetStatus('aiConfigStatus', '连接失败: ' + e.message, true);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function runAiAnalyze() {
+    if (!state.currentCid) {
+        _aiSetStatus('aiStatus', '请先在左侧选择一个会话', true);
+        return;
+    }
+    const prompt = document.getElementById('aiPrompt').value.trim();
+    if (!prompt) {
+        _aiSetStatus('aiStatus', '请输入分析要求', true);
+        return;
+    }
+
+    const btn = document.getElementById('aiRunBtn');
+    const answerEl = document.getElementById('aiAnswer');
+    const thinkBox = document.getElementById('aiThinking');
+    const thinkBody = document.getElementById('aiThinkingBody');
+    const thinkState = document.getElementById('aiThinkingState');
+
+    btn.disabled = true;
+    btn.textContent = '分析中...';
+    answerEl.innerHTML = '';
+    thinkBox.style.display = 'none';
+    thinkBox.open = true;
+    thinkBody.textContent = '';
+    thinkState.textContent = '';
+    _aiSetStatus('aiStatus', '正在连接模型...');
+
+    const started = Date.now();
+    const timer = setInterval(() => {
+        _aiSetStatus('aiStatus',
+            `分析中… ${Math.round((Date.now() - started) / 1000)}s`);
+    }, 1000);
+
+    let reasoning = '';
+    let content = '';
+    let metaText = '';
+    let failed = null;
+    let renderTimer = null;
+
+    const renderLater = () => {
+        if (renderTimer) return;
+        renderTimer = setTimeout(() => {
+            renderTimer = null;
+            answerEl.innerHTML = renderAiMarkdown(content);
+        }, 80);
+    };
+
+    try {
+        const resp = await fetch('/api/ai/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cid: state.currentCid,
+                prompt: prompt,
+                limit: parseInt(document.getElementById('aiMsgLimit').value, 10) || 300,
+            }),
+        });
+        if (!resp.ok) throw await _apiError(resp);
+        if (!resp.body) throw new Error('浏览器不支持流式读取');
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            let sep;
+            while ((sep = buffer.indexOf('\n\n')) >= 0) {
+                const frame = buffer.slice(0, sep);
+                buffer = buffer.slice(sep + 2);
+
+                for (const line of frame.split('\n')) {
+                    if (!line.startsWith('data:')) continue;
+                    const raw = line.slice(5).trim();
+                    if (!raw) continue;
+
+                    let ev;
+                    try { ev = JSON.parse(raw); } catch (e) { continue; }
+
+                    if (ev.type === 'meta') {
+                        metaText = `${ev.model} · 使用 ${ev.messages_used}/${ev.messages_total} 条消息`;
+                    } else if (ev.type === 'reasoning') {
+                        reasoning += ev.text;
+                        thinkBox.style.display = '';
+                        thinkState.textContent = `${reasoning.length} 字`;
+                        thinkBody.textContent = reasoning;
+                        thinkBody.scrollTop = thinkBody.scrollHeight;
+                    } else if (ev.type === 'content') {
+                        content += ev.text;
+                        renderLater();
+                    } else if (ev.type === 'error') {
+                        failed = ev.message || '未知错误';
+                    }
+                }
+            }
+        }
+
+        if (renderTimer) {
+            clearTimeout(renderTimer);
+            renderTimer = null;
+        }
+        answerEl.innerHTML = content ? renderAiMarkdown(content) : '';
+
+        if (failed) {
+            _aiSetStatus('aiStatus', '分析失败: ' + failed, true);
+        } else if (!content) {
+            _aiSetStatus('aiStatus', '模型未返回内容', true);
+        } else {
+            _aiSetStatus('aiStatus', metaText);
+        }
+    } catch (e) {
+        _aiSetStatus('aiStatus', '分析失败: ' + e.message, true);
+    } finally {
+        clearInterval(timer);
+        btn.disabled = false;
+        btn.textContent = '开始分析';
+        if (!reasoning) thinkBox.style.display = 'none';
+    }
+}
+
 // --- Lightbox ---
 
 function openLightbox(src) {
@@ -786,6 +1180,25 @@ function init() {
             btn.disabled = false;
             progress.textContent = '导出失败: ' + e.message;
         }
+    });
+
+    // AI analysis
+    document.getElementById('aiBtn').addEventListener('click', openAiModal);
+    document.getElementById('aiModalClose').addEventListener('click', () => {
+        document.getElementById('aiModal').style.display = 'none';
+    });
+    document.getElementById('aiSaveBtn').addEventListener('click', saveAiConfig);
+    document.getElementById('aiTestBtn').addEventListener('click', testAiConnection);
+    document.getElementById('aiModelSelect').addEventListener('change', onAiModelSelectChange);
+    document.getElementById('aiRunBtn').addEventListener('click', runAiAnalyze);
+    document.querySelectorAll('.ai-presets button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.getElementById('aiPrompt').value = btn.dataset.prompt;
+            document.getElementById('aiPrompt').focus();
+        });
+    });
+    document.getElementById('aiPrompt').addEventListener('keydown', e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runAiAnalyze();
     });
 
     // Lightbox

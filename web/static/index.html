@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>钉钉聊天记录导出工具</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260417j">
+    <link rel="stylesheet" href="/static/style.css?v=20261028c">
 </head>
 <body>
     <div id="app">
@@ -21,6 +21,7 @@
                         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"/></svg>
                     </button>
                 </div>
+                <button id="aiBtn" class="btn btn-secondary" title="AI 分析当前会话">AI 分析</button>
                 <button id="syncBtn" class="btn btn-primary" title="手动同步">手动同步</button>
                 <button id="exportBtn" class="btn btn-secondary" title="导出列表">导出</button>
             </div>
@@ -135,6 +136,73 @@
             </div>
         </div>
 
+        <!-- AI analysis modal -->
+        <div class="modal" id="aiModal" style="display:none">
+            <div class="modal-content modal-wide ai-modal">
+                <div class="modal-header">
+                    <h3>AI 聊天记录分析 <span class="ai-conv-title" id="aiConvTitle"></span></h3>
+                    <button class="modal-close" id="aiModalClose">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <details class="ai-config" id="aiConfigBox">
+                        <summary>模型配置 <span id="aiConfigSummary"></span></summary>
+                        <div class="ai-form">
+                            <div class="ai-field">
+                                <label for="aiModelSelect">已保存</label>
+                                <select id="aiModelSelect"></select>
+                            </div>
+                            <div class="ai-field">
+                                <label for="aiBaseUrl">接口地址</label>
+                                <input id="aiBaseUrl" type="text" placeholder="https://api.deepseek.com/v1">
+                            </div>
+                            <div class="ai-field">
+                                <label for="aiApiKey">API Key</label>
+                                <input id="aiApiKey" type="password" placeholder="留空则保持不变">
+                            </div>
+                            <div class="ai-field">
+                                <label for="aiModel">模型</label>
+                                <input id="aiModel" type="text" placeholder="deepseek-chat">
+                            </div>
+                            <div class="ai-field ai-field-short">
+                                <label for="aiTemperature">温度</label>
+                                <input id="aiTemperature" type="number" step="0.1" min="0" max="2" value="0.7">
+                            </div>
+                            <div class="ai-actions">
+                                <button class="btn btn-primary" id="aiSaveBtn">保存配置</button>
+                                <button class="btn ai-test-btn" id="aiTestBtn">测试连接</button>
+                                <span class="ai-status" id="aiConfigStatus"></span>
+                            </div>
+                            <p class="ai-hint">兼容 OpenAI 接口的服务均可：DeepSeek、通义千问、Kimi、GLM、Ollama、one-api 等。已保存的模型会优先复用，同一接口地址 + 模型不会重复添加。密钥仅保存在本机用户配置目录（Windows 为 %APPDATA%\dingwave-V3），不写入代码目录，也不会回传浏览器。</p>
+                        </div>
+                    </details>
+
+                    <div class="ai-run-toolbar">
+                        <span class="ai-presets">
+                            快捷：
+                            <button type="button" data-prompt="请总结这段聊天记录的核心内容、结论和待办事项。">总结</button>
+                            <button type="button" data-prompt="提取这段聊天记录中所有明确的待办事项，列出负责人和时间节点；没有则说明。">待办</button>
+                            <button type="button" data-prompt="分析这段聊天记录中的风险点、争议和需要跟进的问题。">风险</button>
+                        </span>
+                        <select id="aiMsgLimit">
+                            <option value="100">最近 100 条</option>
+                            <option value="300" selected>最近 300 条</option>
+                            <option value="1000">最近 1000 条</option>
+                        </select>
+                    </div>
+                    <textarea id="aiPrompt" class="ai-prompt" rows="3" placeholder="想分析什么？例如：总结这段对话的结论和待办"></textarea>
+                    <div class="ai-run-actions">
+                        <button class="btn btn-primary" id="aiRunBtn">开始分析</button>
+                        <span class="ai-status" id="aiStatus"></span>
+                    </div>
+                    <details class="ai-thinking" id="aiThinking" style="display:none" open>
+                        <summary>思考过程 <span id="aiThinkingState"></span></summary>
+                        <div class="ai-thinking-body" id="aiThinkingBody"></div>
+                    </details>
+                    <div class="ai-answer" id="aiAnswer"></div>
+                </div>
+            </div>
+        </div>
+
         <!-- Image lightbox -->
         <div class="lightbox" id="lightbox" style="display:none">
             <button class="lightbox-close" id="lightboxClose">&times;</button>
@@ -142,6 +210,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260417j"></script>
+    <script src="/static/app.js?v=20261028b"></script>
 </body>
 </html>
