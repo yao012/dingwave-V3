@@ -96,10 +96,12 @@ async def api_messages(
     offset: int = Query(0, ge=0),
     since: int = Query(None, description="Since timestamp (ms)"),
     until: int = Query(None, description="Until timestamp (ms)"),
+    anchor: int = Query(None, description="Jump to the page containing this message timestamp (ms)"),
 ):
     conn = get_connection()
     try:
-        result = get_messages(conn, cid, limit=limit, offset=offset, since_time=since, until_time=until)
+        result = get_messages(conn, cid, limit=limit, offset=offset, since_time=since,
+                              until_time=until, anchor_time=anchor)
         return result
     finally:
         conn.close()

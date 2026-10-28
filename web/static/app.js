@@ -8,6 +8,7 @@ const state = {
     currentOffset: 0,
     currentLimit: 50,
     totalMessages: 0,
+    anchor: null,          // search hit to locate: {mid, createdAt}
     convOffset: 0,
     convLimit: 50,
     myUid: '',
@@ -197,9 +198,10 @@ function renderConversations(total) {
     });
 }
 
-async function selectConversation(cid) {
+async function selectConversation(cid, anchor = null) {
     state.currentCid = cid;
     state.currentOffset = 0;
+    state.anchor = anchor;
 
     // Update sidebar active state
     document.querySelectorAll('.conv-item').forEach(el => {
@@ -212,9 +214,12 @@ async function selectConversation(cid) {
     document.getElementById('messageView').style.display = 'flex';
 
     const conv = state.conversations.find(c => c.cid === cid);
-    document.getElementById('convTitle').textContent = conv ? conv.title : cid;
-    document.getElementById('convMeta').textContent = conv ?
-        `${conv.type === 'group' ? '群聊' : '单聊'} · ${conv.member_count || ''}人` : '';
+    // A search hit may point at a conversation that is not in the loaded
+    // sidebar page — fall back to the info returned with the search result.
+    const info = conv || anchor || {};
+    document.getElementById('convTitle').textContent = info.title || cid;
+    document.getElementById('convMeta').textContent = info.type ?
+        `${info.type === 'group' ? '群聊' : '单聊'}${info.member_count ? ' · ' + info.member_count + '人' : ''}` : '';
 
     await loadMessages();
 }
@@ -229,14 +234,22 @@ async function loadMessages() {
         offset: state.currentOffset,
     });
 
+    // Anchor only applies to the jump that opens the conversation.
+    const anchor = state.anchor;
+    state.anchor = null;
+    if (anchor && anchor.createdAt) {
+        params.set('anchor', anchor.createdAt);
+    }
+
     const data = await apiGet(`/api/conversations/${state.currentCid}/messages?${params}`);
     state.totalMessages = data.total;
+    if (data.offset !== undefined) state.currentOffset = data.offset;
 
-    renderMessages(data.messages);
+    renderMessages(data.messages, anchor);
     renderPagination();
 }
 
-function renderMessages(messages) {
+function renderMessages(messages, anchor = null) {
     const list = document.getElementById('messageList');
     const myUid = state.myUid;
 
@@ -344,8 +357,9 @@ function renderMessages(messages) {
                 contentHtml = msg.text ? escapeHtml(msg.text) : `[${msg.content_type_name || '消息'}]`;
         }
 
+        const isAnchor = anchor && String(msg.id) === String(anchor.mid);
         html += `
-            <div class="msg-item ${isSelf ? 'self' : ''}">
+            <div class="msg-item ${isSelf ? 'self' : ''} ${isAnchor ? 'msg-anchor' : ''}">
                 <div class="msg-sender">${escapeHtml(msg.sender_name)}</div>
                 <div class="msg-bubble">${contentHtml}</div>
                 <div class="msg-time">${msg.created_at_str || formatTime(msg.created_at)}</div>
@@ -368,8 +382,13 @@ function renderMessages(messages) {
         });
     });
 
-    // Scroll to bottom
-    list.scrollTop = list.scrollHeight;
+    // Scroll to the search hit when jumping, otherwise to the newest message
+    const anchorEl = anchor ? list.querySelector('.msg-anchor') : null;
+    if (anchorEl) {
+        anchorEl.scrollIntoView({ block: 'center' });
+    } else {
+        list.scrollTop = list.scrollHeight;
+    }
 }
 
 function _getWeekday(ts) {
@@ -423,6 +442,8 @@ function goToPage(page) {
 
 // --- Search ---
 
+let _searchResults = [];   // parsed results backing the search view
+
 async function doSearch() {
     const query = document.getElementById('searchInput').value.trim();
     if (!query) return;
@@ -440,15 +461,44 @@ async function doSearch() {
         return;
     }
 
-    results.innerHTML = data.messages.map(msg => `
-        <div class="msg-item" style="max-width:100%">
-            <div class="msg-sender">
-                ${escapeHtml(msg.sender_name)}
-                <span style="margin-left:8px;font-size:11px;color:#999">${msg.created_at_str}</span>
+    _searchResults = data.messages;
+    results.innerHTML = data.messages.map((msg, i) => {
+        const conv = msg.conversation || {};
+        const badge = conv.type === 'group' ? '群' : (conv.type === 'single' ? '单聊' : '');
+        return `
+        <div class="search-result" data-idx="${i}" title="点击定位到该消息">
+            <div class="search-result-conv">
+                ${badge ? `<span class="conv-type-badge ${conv.type}">${badge}</span>` : ''}
+                <span class="search-result-title">${escapeHtml(conv.title || msg.cid)}</span>
+                <span class="search-result-time">${msg.created_at_str}</span>
             </div>
-            <div class="msg-bubble">${highlightSearch(escapeHtml(msg.text), query)}</div>
-        </div>
-    `).join('');
+            <div class="msg-item" style="max-width:100%">
+                <div class="msg-sender">${escapeHtml(msg.sender_name)}</div>
+                <div class="msg-bubble">${highlightSearch(escapeHtml(msg.text), query)}</div>
+            </div>
+        </div>`;
+    }).join('');
+
+    results.querySelectorAll('.search-result').forEach(el => {
+        el.addEventListener('click', () => openSearchResult(_searchResults[Number(el.dataset.idx)]));
+    });
+}
+
+/**
+ * Open the conversation a search result belongs to and jump to that message.
+ * @param {Object} msg parsed search result from /api/search
+ * @returns {Promise<void>}
+ */
+function openSearchResult(msg) {
+    if (!msg) return;
+    const conv = msg.conversation || {};
+    selectConversation(msg.cid, {
+        mid: msg.id,
+        createdAt: msg.created_at,
+        title: conv.title,
+        type: conv.type,
+        member_count: conv.member_count,
+    });
 }
 
 function highlightSearch(text, query) {

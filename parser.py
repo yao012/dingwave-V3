@@ -37,6 +37,30 @@ def get_connection(db_path=None):
     return conn
 
 
+def _conv_display_title(conn, cid, conv_type, title):
+    """Resolve the display title of a conversation.
+
+    Single chats store no title, so the peer's profile name is used instead.
+
+    @param conn: SQLite connection.
+    @param cid: conversation id.
+    @param conv_type: raw conversation type (1 = single, 2 = group).
+    @param title: raw title from tbconversation.
+    @return: resolved display title (may be empty).
+    """
+    if conv_type == 1 and ":" in cid:
+        parts = cid.split(":")
+        try:
+            other_uid = int(parts[1] if parts[0] == config.USER_UID else parts[0])
+        except ValueError:
+            other_uid = None
+        if other_uid is not None:
+            user = get_user_profile(conn, other_uid)
+            if user:
+                return user.get("nick") or user.get("real_name") or (title or "")
+    return title or ""
+
+
 def get_conversations(conn, limit=100, offset=0, keyword=None):
     """Get conversation list with pagination and optional keyword filter."""
     sql = """
@@ -79,14 +103,8 @@ def get_conversations(conn, limit=100, offset=0, keyword=None):
         if row["type"] == 1 and ":" in row["cid"]:
             # Single chat: cid format is "uid1:uid2"
             parts = row["cid"].split(":")
-            other_uid = parts[1] if parts[0] == config.USER_UID else parts[0]
-            conv["other_uid"] = other_uid
-            # Try to get the other user's name
-            user = get_user_profile(conn, int(other_uid))
-            if user and user.get("nick"):
-                conv["title"] = user["nick"]
-            elif user and user.get("realName"):
-                conv["title"] = user["realName"]
+            conv["other_uid"] = parts[1] if parts[0] == config.USER_UID else parts[0]
+        conv["title"] = _conv_display_title(conn, row["cid"], row["type"], row["title"])
 
         conversations.append(conv)
 
@@ -146,8 +164,21 @@ def _get_all_msg_tables():
     return [f"tbmsg_{i:03d}" for i in range(128)]
 
 
-def get_messages(conn, cid, limit=50, offset=0, since_time=None, until_time=None):
-    """Get messages for a conversation with pagination and time filtering."""
+def get_messages(conn, cid, limit=50, offset=0, since_time=None, until_time=None,
+                 anchor_time=None):
+    """Get messages for a conversation with pagination and time filtering.
+
+    @param conn: SQLite connection.
+    @param cid: conversation id.
+    @param limit: page size.
+    @param offset: reverse offset from the newest message.
+    @param since_time: only messages created after this ms timestamp.
+    @param until_time: only messages created at or before this ms timestamp.
+    @param anchor_time: when set, return the page containing the message at this
+        ms timestamp instead of using ``offset``.
+    @return: dict with total, messages and (for anchored requests) the reverse
+        offset of the returned page.
+    """
     table = _find_msg_table(conn, cid)
     if not table:
         return {"total": 0, "messages": []}
@@ -177,13 +208,26 @@ def get_messages(conn, cid, limit=50, offset=0, since_time=None, until_time=None
     '''
     # Reverse offset: show the LAST page by default (most recent messages)
     # offset=0 means "first page from end" = skip (total - limit) oldest messages
-    actual_offset = max(0, total - limit - offset)
+    if anchor_time is not None:
+        # Pick the page (counted from the newest message) that contains the anchor.
+        before = conn.execute(
+            f'SELECT COUNT(*) FROM "{table}" {where} AND createdAt < ?',
+            params + [anchor_time],
+        ).fetchone()[0]
+        page = max(1, (total - 1 - before) // limit + 1) if total else 1
+        actual_offset = max(0, total - page * limit)
+    else:
+        actual_offset = max(0, total - limit - offset)
     params.extend([limit, actual_offset])
 
     rows = conn.execute(sql, params).fetchall()
     messages = [_parse_message(row, conn) for row in rows]
 
-    return {"total": total, "messages": messages}
+    result = {"total": total, "messages": messages}
+    if anchor_time is not None:
+        # Let the frontend show the correct page number for the jump.
+        result["offset"] = max(0, total - limit - actual_offset)
+    return result
 
 
 def get_new_messages(conn, since_time, cid=None):
@@ -525,8 +569,43 @@ def _local_path_to_url(local_path):
     return ""
 
 
+def _get_conversation_map(conn, cids):
+    """Load display info for the conversations a set of search results belong to.
+
+    @param conn: SQLite connection.
+    @param cids: iterable of conversation ids.
+    @return: dict of cid -> {title, type, member_count}.
+    """
+    cids = [c for c in set(cids) if c]
+    if not cids:
+        return {}
+    placeholders = ",".join("?" for _ in cids)
+    rows = conn.execute(
+        f"SELECT cid, type, title, memberCount FROM tbconversation WHERE cid IN ({placeholders})",
+        cids,
+    ).fetchall()
+    result = {}
+    for row in rows:
+        result[row["cid"]] = {
+            "title": _conv_display_title(conn, row["cid"], row["type"], row["title"]),
+            "type": "single" if row["type"] == 1 else "group",
+            "member_count": row["memberCount"],
+        }
+    return result
+
+
 def search_messages(conn, keyword, limit=50, offset=0):
-    """Search messages by keyword across all message tables."""
+    """Search messages by keyword across all message tables.
+
+    Each result carries a ``conversation`` dict so the caller can show which
+    group / chat the hit belongs to and jump back to it.
+
+    @param conn: SQLite connection.
+    @param keyword: text to look for in message content.
+    @param limit: max rows fetched per shard table.
+    @param offset: row offset per shard table.
+    @return: list of parsed messages with conversation info attached.
+    """
     results = []
     for table in _get_all_msg_tables():
         try:
@@ -545,6 +624,9 @@ def search_messages(conn, keyword, limit=50, offset=0):
         except sqlite3.OperationalError:
             continue
 
+    conv_map = _get_conversation_map(conn, (m["cid"] for m in results))
+    for msg in results:
+        msg["conversation"] = conv_map.get(msg["cid"], {})
     return results
 
 

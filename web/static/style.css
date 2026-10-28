@@ -278,6 +278,43 @@ body {
     padding-left: 4px;
 }
 
+/* Search results */
+.search-result {
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+}
+.search-result:hover { border-color: #2196f3; box-shadow: 0 1px 4px rgba(33, 150, 243, .18); }
+.search-result .msg-item { margin-bottom: 0; }
+.search-result-conv {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: var(--text-light);
+}
+.search-result-title {
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.search-result-time { margin-left: auto; flex-shrink: 0; }
+
+/* Message located from a search hit */
+.msg-item.msg-anchor .msg-bubble {
+    box-shadow: 0 0 0 3px #ff9800;
+    animation: msg-anchor-flash 1.2s ease-out;
+}
+@keyframes msg-anchor-flash {
+    from { background-color: #fff3cd; }
+}
+
 /* Date separator in message list */
 .msg-date-sep {
     text-align: center;
