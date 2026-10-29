@@ -543,7 +543,8 @@ async function triggerSync() {
                     btn.disabled = false;
                     btn.textContent = '手动同步';
                     loadSyncStatus();
-                    // Reload conversations if we have one selected
+                    // Refresh the sidebar so relative times reflect the new data
+                    loadConversations(true);
                     if (state.currentCid) {
                         loadMessages();
                     }

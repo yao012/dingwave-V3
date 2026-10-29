@@ -1,5 +1,6 @@
 import os
 import shutil
+import struct
 import subprocess
 import logging
 import time
@@ -118,9 +119,75 @@ def copy_encrypted_db(retry_count=None, retry_delay=None):
     raise RuntimeError("Failed to copy encrypted database")
 
 
+def _apply_wal_pages(db_path, encrypted_wal_path, key):
+    """Merge pages still pending in DingTalk's encrypted WAL into the decrypted DB.
+
+    DingTalk checkpoints its WAL to ``dingtalk.db`` lazily, so decrypting only the
+    main file leaves recent messages (and conversation timestamps) missing for
+    hours. Each WAL frame holds one full, independently AES-ECB-encrypted page;
+    decrypt it and overwrite the matching page in the decrypted DB. Only frames
+    up to the last commit marker are applied, matching SQLite's own replay rules.
+
+    @param db_path: decrypted SQLite file to patch in place
+    @param encrypted_wal_path: encrypted ``dingtalk.db-wal`` (may not exist)
+    @param key: AES-128 key used for the main database
+    @return: number of committed WAL frames applied
+    """
+    if not os.path.isfile(encrypted_wal_path):
+        return 0
+
+    with open(encrypted_wal_path, "rb") as f:
+        wal = f.read()
+    if len(wal) < 32:
+        return 0
+
+    magic, _, page_size, _, salt1, salt2 = struct.unpack(">6I", wal[:24])
+    if magic not in (0x377F0682, 0x377F0683) or page_size != _AES_PAGE_SIZE:
+        logger.warning(f"Ignoring WAL with unexpected header: magic={magic:#x}, page_size={page_size}")
+        return 0
+
+    # Collect frames belonging to the current WAL generation, stopping at the
+    # first frame with a stale salt (leftover from a previous WAL).
+    frames = []
+    last_commit = 0
+    db_pages = 0
+    offset = 32
+    while offset + 24 + page_size <= len(wal):
+        page_no, commit_size, frame_salt1, frame_salt2 = struct.unpack(">4I", wal[offset : offset + 16])
+        if frame_salt1 != salt1 or frame_salt2 != salt2:
+            break
+        frames.append((page_no, offset + 24))
+        if commit_size:
+            last_commit = len(frames)
+            db_pages = commit_size
+        offset += 24 + page_size
+
+    if not last_commit:
+        return 0
+
+    from Crypto.Cipher import AES
+
+    cipher = AES.new(key, AES.MODE_ECB)
+    with open(db_path, "r+b") as f:
+        for page_no, page_offset in frames[:last_commit]:
+            f.seek((page_no - 1) * page_size)
+            f.write(cipher.decrypt(wal[page_offset : page_offset + page_size]))
+        f.truncate(db_pages * page_size)
+
+    logger.info(f"Applied {last_commit} WAL frame(s) from {os.path.basename(encrypted_wal_path)}")
+    return last_commit
+
+
 def decrypt_database_native(encrypted_db_path, output_path, key):
     """Decrypt database using pure Python AES-ECB (works for both V2 and V3)."""
     logger.info(f"Decrypting (native): {encrypted_db_path} -> {output_path}")
+
+    # Stale companions from a previous open would make SQLite replay old pages.
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.remove(output_path + suffix)
+        except OSError:
+            pass
 
     with open(encrypted_db_path, "rb") as f:
         encrypted_data = f.read()
@@ -137,8 +204,10 @@ def decrypt_database_native(encrypted_db_path, output_path, key):
     with open(output_path, "wb") as f:
         f.write(decrypted)
 
+    applied = _apply_wal_pages(output_path, encrypted_db_path + "-wal", key)
+
     size_mb = os.path.getsize(output_path) / 1024 / 1024
-    logger.info(f"Decryption complete. Output size: {size_mb:.1f} MB")
+    logger.info(f"Decryption complete. Output size: {size_mb:.1f} MB, WAL frames applied: {applied}")
     return output_path
 
 

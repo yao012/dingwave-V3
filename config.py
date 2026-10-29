@@ -78,8 +78,9 @@ def _detect_v3_uid_from_logs(data_dir):
     """Detect the numeric V3 UID on Windows from DingTalk's gaea log.
 
     V3 logs lines like `uid=35984434@dingding` / `real_uid=35984434@dingding`.
-    The logs live in {parent_of_data_dir}/log, so the newest ones are scanned
-    from the tail (they can be tens of MB).
+    The logs live in {parent_of_data_dir}/log. They rotate daily and the UID line
+    may be anywhere in the file, so each of the newest few is streamed in full
+    (largest seen ~40 MB) until a match shows up.
     """
     if sys.platform != "win32":
         return None
@@ -94,15 +95,20 @@ def _detect_v3_uid_from_logs(data_dir):
         reverse=True,
     )
     pattern = re.compile(rb"(?:real_)?uid=(\d+)@dingding")
-    for path in log_files[:3]:
+    chunk_size = 4 * 1024 * 1024
+    for path in log_files[:5]:
         try:
-            size = os.path.getsize(path)
+            last_match = None
             with open(path, "rb") as f:
-                f.seek(max(0, size - 2 * 1024 * 1024))
-                chunk = f.read()
-            matches = pattern.findall(chunk)
-            if matches:
-                uid = matches[-1].decode()
+                carry = b""
+                while chunk := f.read(chunk_size):
+                    # Ignore matches wholly inside the carry (already seen).
+                    fresh = [m.group(1) for m in pattern.finditer(carry + chunk) if m.end() > len(carry)]
+                    if fresh:
+                        last_match = fresh[-1]
+                    carry = chunk[-64:]  # keep a seam so matches aren't split
+            if last_match:
+                uid = last_match.decode()
                 logger.info(f"Auto-detected V3 UID from DingTalk logs: {uid}")
                 return uid
         except OSError as e:
